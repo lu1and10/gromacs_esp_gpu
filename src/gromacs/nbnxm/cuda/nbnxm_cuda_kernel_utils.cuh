@@ -290,6 +290,23 @@ static __forceinline__ __device__ float interpolate_coulomb_force_r(const NBPara
     return lerp(d01.x, d01.y, fraction);
 }
 
+/*! Evaluate a monomial polynomial series with Horner's rule. */
+static __forceinline__ __device__ float evaluate_pswf_monomial(const float* coefficients,
+                                                               const int    order,
+                                                               const float  x)
+{
+    if (order <= 0)
+    {
+        return 0.0F;
+    }
+    float result = LDG(coefficients);
+    for (int i = 1; i < order; i++)
+    {
+        result = fmaf(x, result, LDG(coefficients + i));
+    }
+    return result;
+}
+
 /*! Fetch C6 and C12 from the parameter table.
  *
  *  Depending on what is supported, it fetches parameters either

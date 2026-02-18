@@ -112,6 +112,29 @@ static bool __device__ __forceinline__ pme_gpu_check_atom_charge(const float coe
 //! Controls if the atom and charge data is prefeched into shared memory or loaded per thread from global
 static const bool c_useAtomDataPrefetch = true;
 
+/*! \brief Evaluate PSWF spread polynomial for a single grid point using Horner's method.
+ *
+ * Coefficients are laid out as polyOrder rows with a fixed dense row stride (PME order).
+ */
+static __device__ __forceinline__ float mono_eval_device(const float* __restrict__ coefficients,
+                                                                const int coeffStride,
+                                                                const int polyOrder,
+                                                                const int spreadIndex,
+                                                                const float x)
+{
+    if (polyOrder <= 0)
+    {
+        return 0.0F;
+    }
+    float result = coefficients[spreadIndex];
+#pragma unroll
+    for (int i = 1; i < polyOrder; i++)
+    {
+        result = fmaf(x, result, coefficients[i * coeffStride + spreadIndex]);
+    }
+    return result;
+}
+
 /*! \brief Asserts if the argument is finite.
  *
  *  The function works for any data type, that can be casted to float. Note that there is also
@@ -298,89 +321,139 @@ static __device__ __forceinline__ void calculate_splines(const PmeGpuCudaKernelP
             }
         }
 
-        /* B-spline calculation */
+        /* Spread/Spline calculation (PSWF preferred, B-spline fallback) */
 
         const int chargeCheck = pme_gpu_check_atom_charge(atomCharge);
         /* With FEP (numGrids == 2), we might have 0 charge in state A, but !=0 in state B, so we always calculate splines */
         if (numGrids == 2 || chargeCheck)
         {
-            float div;
             int o = orderIndex; // This is an index that is set once for PME_GPU_PARALLEL_SPLINE == 1
 
             const float dr = sm_fractCoords[sharedMemoryIndex];
             assert(isfinite(dr));
 
-            /* dr is relative offset from lower cell limit */
-            splineData[order - 1] = 0.0F;
-            splineData[1]         = dr;
-            splineData[0]         = 1.0F - dr;
-
-#pragma unroll
-            for (int k = 3; k < order; k++)
-            {
-                div               = 1.0F / (k - 1.0F);
-                splineData[k - 1] = div * dr * splineData[k - 2];
-#pragma unroll
-                for (int l = 1; l < (k - 1); l++)
-                {
-                    splineData[k - l - 1] =
-                            div * ((dr + l) * splineData[k - l - 2] + (k - l - dr) * splineData[k - l - 1]);
-                }
-                splineData[0] = div * (1.0F - dr) * splineData[0];
-            }
-
             const int thetaIndexBase =
                     getSplineParamIndexBase<order, atomsPerWarp>(warpIndex, atomWarpIndex);
             const int thetaGlobalOffsetBase = atomIndexOffset * DIM * order;
-            /* only calculate dtheta if we are saving it to shared or global memory */
-            if (writeSmDtheta || writeGlobal)
+            const bool usePswf =
+                    (kernelParams.grid.pswfSpreadCoeffStride >= order)
+                    && (kernelParams.grid.pswfSpreadPolyOrder > 0)
+                    && (kernelParams.grid.pswfSpreadDerivPolyOrder > 0);
+            if (usePswf)
             {
-                /* Differentiation and storing the spline derivatives (dtheta) */
+                const float* __restrict__ pswfCoeff    = kernelParams.grid.d_pswfSpreadCoeffs;
+                const float* __restrict__ pswfDerCoeff = kernelParams.grid.d_pswfSpreadDerivCoeffs;
+                const int pswfCoeffStride              = kernelParams.grid.pswfSpreadCoeffStride;
+                const int pswfPolyOrder                = kernelParams.grid.pswfSpreadPolyOrder;
+                const int pswfDerPolyOrder             = kernelParams.grid.pswfSpreadDerivPolyOrder;
+
+                /* Direct polynomial evaluation of theta/dtheta for each spline index. */
 #pragma unroll
                 for (o = 0; o < order; o++)
                 {
                     const int thetaIndex =
                             getSplineParamIndex<order, atomsPerWarp>(thetaIndexBase, dimIndex, o);
-
-                    const float dtheta = ((o > 0) ? splineData[o - 1] : 0.0F) - splineData[o];
-                    assert(isfinite(dtheta));
+                    const float theta = mono_eval_device(
+                            pswfCoeff, pswfCoeffStride, pswfPolyOrder, o, dr);
+                    assert(isfinite(theta));
                     assert(thetaIndex < order * DIM * atomsPerBlock);
-                    if (writeSmDtheta)
-                    {
-                        sm_dtheta[thetaIndex] = dtheta;
-                    }
+                    sm_theta[thetaIndex] = theta;
                     if (writeGlobal)
                     {
-                        const int thetaGlobalIndex  = thetaGlobalOffsetBase + thetaIndex;
-                        gm_dtheta[thetaGlobalIndex] = dtheta;
+                        const int thetaGlobalIndex = thetaGlobalOffsetBase + thetaIndex;
+                        gm_theta[thetaGlobalIndex] = theta;
+                    }
+                    if (writeSmDtheta || writeGlobal)
+                    {
+                        const float dtheta = mono_eval_device(
+                                pswfDerCoeff, pswfCoeffStride, pswfDerPolyOrder, o, dr);
+                        assert(isfinite(dtheta));
+                        if (writeSmDtheta)
+                        {
+                            sm_dtheta[thetaIndex] = dtheta;
+                        }
+                        if (writeGlobal)
+                        {
+                            const int thetaGlobalIndex  = thetaGlobalOffsetBase + thetaIndex;
+                            gm_dtheta[thetaGlobalIndex] = dtheta;
+                        }
                     }
                 }
             }
-
-            div                   = 1.0F / (order - 1.0F);
-            splineData[order - 1] = div * dr * splineData[order - 2];
-#pragma unroll
-            for (int k = 1; k < (order - 1); k++)
+            else
             {
-                splineData[order - k - 1] = div
-                                            * ((dr + k) * splineData[order - k - 2]
-                                               + (order - k - dr) * splineData[order - k - 1]);
-            }
-            splineData[0] = div * (1.0F - dr) * splineData[0];
+                float div;
 
-            /* Storing the spline values (theta) */
+                /* dr is relative offset from lower cell limit */
+                splineData[order - 1] = 0.0F;
+                splineData[1]         = dr;
+                splineData[0]         = 1.0F - dr;
+
 #pragma unroll
-            for (o = 0; o < order; o++)
-            {
-                const int thetaIndex =
-                        getSplineParamIndex<order, atomsPerWarp>(thetaIndexBase, dimIndex, o);
-                assert(thetaIndex < order * DIM * atomsPerBlock);
-                sm_theta[thetaIndex] = splineData[o];
-                assert(isfinite(sm_theta[thetaIndex]));
-                if (writeGlobal)
+                for (int k = 3; k < order; k++)
                 {
-                    const int thetaGlobalIndex = thetaGlobalOffsetBase + thetaIndex;
-                    gm_theta[thetaGlobalIndex] = splineData[o];
+                    div               = 1.0F / (k - 1.0F);
+                    splineData[k - 1] = div * dr * splineData[k - 2];
+#pragma unroll
+                    for (int l = 1; l < (k - 1); l++)
+                    {
+                        splineData[k - l - 1] = div
+                                                * ((dr + l) * splineData[k - l - 2]
+                                                   + (k - l - dr) * splineData[k - l - 1]);
+                    }
+                    splineData[0] = div * (1.0F - dr) * splineData[0];
+                }
+
+                /* only calculate dtheta if we are saving it to shared or global memory */
+                if (writeSmDtheta || writeGlobal)
+                {
+                    /* Differentiation and storing the spline derivatives (dtheta) */
+#pragma unroll
+                    for (o = 0; o < order; o++)
+                    {
+                        const int thetaIndex =
+                                getSplineParamIndex<order, atomsPerWarp>(thetaIndexBase, dimIndex, o);
+
+                        const float dtheta = ((o > 0) ? splineData[o - 1] : 0.0F) - splineData[o];
+                        assert(isfinite(dtheta));
+                        assert(thetaIndex < order * DIM * atomsPerBlock);
+                        if (writeSmDtheta)
+                        {
+                            sm_dtheta[thetaIndex] = dtheta;
+                        }
+                        if (writeGlobal)
+                        {
+                            const int thetaGlobalIndex  = thetaGlobalOffsetBase + thetaIndex;
+                            gm_dtheta[thetaGlobalIndex] = dtheta;
+                        }
+                    }
+                }
+
+                div                   = 1.0F / (order - 1.0F);
+                splineData[order - 1] = div * dr * splineData[order - 2];
+#pragma unroll
+                for (int k = 1; k < (order - 1); k++)
+                {
+                    splineData[order - k - 1] = div
+                                                * ((dr + k) * splineData[order - k - 2]
+                                                   + (order - k - dr) * splineData[order - k - 1]);
+                }
+                splineData[0] = div * (1.0F - dr) * splineData[0];
+
+                /* Storing the spline values (theta) */
+#pragma unroll
+                for (o = 0; o < order; o++)
+                {
+                    const int thetaIndex =
+                            getSplineParamIndex<order, atomsPerWarp>(thetaIndexBase, dimIndex, o);
+                    assert(thetaIndex < order * DIM * atomsPerBlock);
+                    sm_theta[thetaIndex] = splineData[o];
+                    assert(isfinite(sm_theta[thetaIndex]));
+                    if (writeGlobal)
+                    {
+                        const int thetaGlobalIndex = thetaGlobalOffsetBase + thetaIndex;
+                        gm_theta[thetaGlobalIndex] = splineData[o];
+                    }
                 }
             }
         }

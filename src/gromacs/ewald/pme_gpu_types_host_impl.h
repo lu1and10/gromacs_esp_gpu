@@ -187,6 +187,22 @@ struct PmeGpuSpecific
     int splineValuesSize[NUMFEPSTATES] = { 0, 0 };
     /*! \brief The kernelParams.grid.splineValuesArray float element count (reserved) */
     int splineValuesCapacity[NUMFEPSTATES] = { 0, 0 };
+    /*! \brief The kernelParams.grid.d_pswfSpreadCoeffs float element count (actual) */
+    int pswfSpreadCoeffsSize = 0;
+    /*! \brief The kernelParams.grid.d_pswfSpreadCoeffs float element count (reserved) */
+    int pswfSpreadCoeffsCapacity = 0;
+    /*! \brief The kernelParams.grid.d_pswfSpreadDerivCoeffs float element count (actual) */
+    int pswfSpreadDerivCoeffsSize = 0;
+    /*! \brief The kernelParams.grid.d_pswfSpreadDerivCoeffs float element count (reserved) */
+    int pswfSpreadDerivCoeffsCapacity = 0;
+    /*! \brief The kernelParams.grid.d_pswfSplitFourierCoeffs float element count (actual) */
+    int pswfSplitFourierCoeffsSize = 0;
+    /*! \brief The kernelParams.grid.d_pswfSplitFourierCoeffs float element count (reserved) */
+    int pswfSplitFourierCoeffsCapacity = 0;
+    /*! \brief The kernelParams.grid.d_pswfSplitFourierDerivCoeffs float element count (actual) */
+    int pswfSplitFourierDerivCoeffsSize = 0;
+    /*! \brief The kernelParams.grid.d_pswfSplitFourierDerivCoeffs float element count (reserved) */
+    int pswfSplitFourierDerivCoeffsCapacity = 0;
     /*! \brief The kernelParams.grid.realGrid float element count (actual) */
     int realGridSize[NUMFEPSTATES] = { 0, 0 };
     /*! \brief The kernelParams.grid.realGrid float element count (reserved) */

@@ -48,6 +48,35 @@
 
 #include "pme.cuh"
 
+/*! \brief Evaluate Chebyshev polynomial series via Clenshaw recurrence. */
+static __device__ __forceinline__ float cheb_eval_device(const float x,
+                                                                         const float* coefficients,
+                                                                         const int    order)
+{
+    if (order <= 0)
+    {
+        return 0.0F;
+    }
+    if (order == 1)
+    {
+        return coefficients[0];
+    }
+
+    const float y  = 2.0F * x - 1.0F;
+    const float y2 = 2.0F * y;
+    float       b0 = 0.0F;
+    float       b1 = 0.0F;
+    float       b2 = 0.0F;
+    for (int i = order - 1; i > 0; --i)
+    {
+        b2 = b1;
+        b1 = b0;
+        b0 = coefficients[i] + y2 * b1 - b2;
+    }
+
+    return coefficients[0] + b0 * y - b1;
+}
+
 /*! \brief
  * PME complex grid solver kernel function.
  *
@@ -128,6 +157,19 @@ __launch_bounds__(c_solveMaxThreadsPerBlock) CLANG_DISABLE_OPTIMIZATION_ATTRIBUT
     float viryy  = 0.0F;
     float viryz  = 0.0F;
     float virzz  = 0.0F;
+    const float pswfScale = (kernelParams.grid.pswfSplitCoeffQ != 0.0F)
+                                    ? (2.0F * kernelParams.grid.pswfRcoulomb
+                                       / kernelParams.grid.pswfSplitCoeffQ)
+                                    : 0.0F;
+    const int   pswfSplitOrder = kernelParams.grid.pswfSplitFourierPolyOrder;
+    const int   pswfSplitDerOrder = kernelParams.grid.pswfSplitFourierDerivPolyOrder;
+    const float* __restrict__ gm_pswfSplitCoeffs = kernelParams.grid.d_pswfSplitFourierCoeffs;
+    const float* __restrict__ gm_pswfSplitDerCoeffs = kernelParams.grid.d_pswfSplitFourierDerivCoeffs;
+    float       h = c_pmeGpuOrder / 2.0F;
+#ifdef MYDEBUGUSEBSPLINE
+    h = 1.0F;
+#endif
+    const float h2 = h * h;
 
     assert(indexMajor < kernelParams.grid.localComplexGridSize[majorDim]);
     if ((indexMiddle < localCountMiddle) & (indexMinor < localCountMinor)
@@ -211,13 +253,27 @@ __launch_bounds__(c_solveMaxThreadsPerBlock) CLANG_DISABLE_OPTIMIZATION_ATTRIBUT
             assert(m2k != 0.0F);
             // TODO: use LDG/textures for gm_splineValue
             float denom = m2k * float(CUDART_PI_F) * kernelParams.current.boxVolume
-                          * gm_splineValueMajor[kMajor] * gm_splineValueMiddle[kMiddle]
-                          * gm_splineValueMinor[kMinor];
+                          * gm_splineValueMajor[kMajor] * h2
+                          * gm_splineValueMiddle[kMiddle] * h2
+                          * gm_splineValueMinor[kMinor] * h2;
             assert(isfinite(denom));
             assert(denom != 0.0F);
-
-            const float tmp1   = expf(-kernelParams.grid.ewaldFactor * m2k);
-            const float etermk = kernelParams.constants.elFactor * tmp1 / denom;
+            const float arg = pswfScale * sqrtf(float(CUDART_PI_F) * float(CUDART_PI_F) * m2k);
+            float       split = 0.0F;
+            float       splitDer = 0.0F;
+            if (arg <= 1.0F)
+            {
+                split = 0.5F * cheb_eval_device(arg, gm_pswfSplitCoeffs, pswfSplitOrder);
+                if (computeEnergyAndVirial)
+                {
+                    splitDer = 0.5F
+                               * cheb_eval_device(
+                                       arg, gm_pswfSplitDerCoeffs, pswfSplitDerOrder);
+                }
+            }
+            const float etermk = kernelParams.constants.elFactor * split / denom;
+            const float etermkDer =
+                    computeEnergyAndVirial ? (kernelParams.constants.elFactor * splitDer / denom) : 0.0F;
 
             float2       gridValue    = *gm_gridCell;
             const float2 oldGridValue = gridValue;
@@ -227,14 +283,13 @@ __launch_bounds__(c_solveMaxThreadsPerBlock) CLANG_DISABLE_OPTIMIZATION_ATTRIBUT
 
             if (computeEnergyAndVirial)
             {
-                const float tmp1k =
-                        2.0F * (gridValue.x * oldGridValue.x + gridValue.y * oldGridValue.y);
-
-                float vfactor = (kernelParams.grid.ewaldFactor + 1.0F / m2k) * 2.0F;
-                float ets2    = corner_fac * tmp1k;
-                energy        = ets2;
-
-                float ets2vf = ets2 * vfactor;
+                const float struct2 = 2.0F
+                                      * (oldGridValue.x * oldGridValue.x
+                                         + oldGridValue.y * oldGridValue.y);
+                const float m2inv  = 1.0F / m2k;
+                const float ets2   = corner_fac * struct2 * etermk;
+                const float ets2vf = ets2 * (2.0F * m2inv) - corner_fac * struct2 * etermkDer * m2inv;
+                energy             = ets2;
 
                 virxx = ets2vf * mhxk * mhxk - ets2;
                 virxy = ets2vf * mhxk * mhyk;

@@ -119,6 +119,22 @@ struct PmeShared
     int pme_order;
     /*! \brief Ewald splitting coefficient for Coulomb */
     real ewaldcoeff_q;
+    /*! \brief PSWF spread shape parameter. */
+    real pswfSpreadCoeffQ;
+    /*! \brief PSWF split shape parameter. */
+    real pswfSplitCoeffQ;
+    /*! \brief PSWF real-space cutoff used by split/scaling. */
+    real pswfRcoulomb;
+    /*! \brief spread order per PSWF polynomial row in dense poly-major layout. */
+    int pswfSpreadCoeffStride;
+    /*! \brief PSWF spread polynomial order (monomial basis). */
+    int pswfSpreadPolyOrder;
+    /*! \brief PSWF spread derivative polynomial order (monomial basis). */
+    int pswfSpreadDerivPolyOrder;
+    /*! \brief PSWF split Fourier polynomial order (Chebyshev basis). */
+    int pswfSplitFourierPolyOrder;
+    /*! \brief PSWF split Fourier derivative polynomial order (Chebyshev basis). */
+    int pswfSplitFourierDerivPolyOrder;
     /*! \brief Electrostatics parameter */
     real epsilon_r;
     /*! \brief Gridline indices - nnx, nny, nnz */
@@ -127,6 +143,14 @@ struct PmeShared
     std::vector<real> fsh;
     /*! \brief Precomputed B-spline values */
     std::vector<real> bsp_mod[DIM];
+    /*! \brief PSWF spread coefficients in monomial basis (dense poly-major: [poly][spread]). */
+    std::vector<real> pswfSpreadCoeffs;
+    /*! \brief PSWF spread derivative coefficients in monomial basis (dense poly-major: [poly][spread]). */
+    std::vector<real> pswfSpreadDerivCoeffs;
+    /*! \brief PSWF split coefficients in Fourier space (Chebyshev basis). */
+    std::vector<real> pswfSplitFourierCoeffs;
+    /*! \brief PSWF split derivative coefficients in Fourier space (Chebyshev basis). */
+    std::vector<real> pswfSplitFourierDerivCoeffs;
     /*! \brief The PME codepath being taken */
     PmeRunMode runMode;
     /*! \brief  Whether PME execution is happening on a PME-only rank (from gmx_pme_t.bPPnode). */

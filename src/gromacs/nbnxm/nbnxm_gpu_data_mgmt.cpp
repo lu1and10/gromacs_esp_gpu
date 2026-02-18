@@ -201,6 +201,10 @@ static inline void set_cutoff_parameters(NBParamGpu*                nbp,
 {
     nbp->ewald_beta        = ic.ewaldcoeff_q;
     nbp->sh_ewald          = ic.sh_ewald;
+    nbp->rcoulomb_inv      = (ic.rcoulomb != 0) ? (1.0F / ic.rcoulomb) : 0.0F;
+    nbp->pswf_self         = (ic.pswfcoeff_c0 != 0 && ic.rcoulomb != 0)
+                                     ? (0.5F * ic.pswfcoeff_psi0 / (ic.pswfcoeff_c0 * ic.rcoulomb))
+                                     : 0.0F;
     nbp->epsfac            = ic.epsfac;
     nbp->two_k_rf          = 2.0 * ic.reactionFieldCoefficient;
     nbp->c_rf              = ic.reactionFieldShift;
@@ -217,6 +221,68 @@ static inline void set_cutoff_parameters(NBParamGpu*                nbp,
     nbp->dispersion_shift = ic.dispersion_shift;
     nbp->repulsion_shift  = ic.repulsion_shift;
     nbp->vdw_switch       = ic.vdw_switch;
+}
+
+static inline void init_pswf_polynomial_tables(const interaction_const_t& ic,
+                                               NBParamGpu*                nbp,
+                                               const DeviceContext&       deviceContext,
+                                               const DeviceStream&        localStream)
+{
+    GMX_RELEASE_ASSERT(ic.pswfPolynomials, "Need valid PSWF polynomial coefficients");
+    const auto& forceCoefficients  = ic.pswfPolynomials->pswf_long_range_force_mono;
+    const auto& energyCoefficients = ic.pswfPolynomials->pswf_long_range_energy_mono;
+    if (forceCoefficients.empty() || energyCoefficients.empty())
+    {
+        freeDeviceBuffer(&nbp->pswf_long_range_force_coeff);
+        freeDeviceBuffer(&nbp->pswf_long_range_energy_coeff);
+        nbp->pswf_long_range_force_order  = 0;
+        nbp->pswf_long_range_energy_order = 0;
+        return;
+    }
+
+    const int forceCoeffCount  = forceCoefficients.size();
+    const int energyCoeffCount = energyCoefficients.size();
+
+    if (nbp->pswf_long_range_force_coeff)
+    {
+        freeDeviceBuffer(&nbp->pswf_long_range_force_coeff);
+    }
+    if (nbp->pswf_long_range_energy_coeff)
+    {
+        freeDeviceBuffer(&nbp->pswf_long_range_energy_coeff);
+    }
+
+    allocateDeviceBuffer(&nbp->pswf_long_range_force_coeff, forceCoeffCount, deviceContext);
+    allocateDeviceBuffer(&nbp->pswf_long_range_energy_coeff, energyCoeffCount, deviceContext);
+
+    std::vector<float> forceCoefficientsF(forceCoeffCount);
+    std::vector<float> energyCoefficientsF(energyCoeffCount);
+    for (int i = 0; i < forceCoeffCount; ++i)
+    {
+        forceCoefficientsF[i] = static_cast<float>(forceCoefficients[i]);
+    }
+    for (int i = 0; i < energyCoeffCount; ++i)
+    {
+        energyCoefficientsF[i] = static_cast<float>(energyCoefficients[i]);
+    }
+
+    copyToDeviceBuffer(&nbp->pswf_long_range_force_coeff,
+                       forceCoefficientsF.data(),
+                       0,
+                       forceCoeffCount,
+                       localStream,
+                       GpuApiCallBehavior::Sync,
+                       nullptr);
+    copyToDeviceBuffer(&nbp->pswf_long_range_energy_coeff,
+                       energyCoefficientsF.data(),
+                       0,
+                       energyCoeffCount,
+                       localStream,
+                       GpuApiCallBehavior::Sync,
+                       nullptr);
+
+    nbp->pswf_long_range_force_order  = forceCoeffCount;
+    nbp->pswf_long_range_energy_order = energyCoeffCount;
 }
 
 GpuPairlistSorting::GpuPairlistSorting() {}
@@ -403,6 +469,7 @@ static inline void initNbparam(NBParamGpu*                     nbp,
         GMX_RELEASE_ASSERT(ic.coulombEwaldTables, "Need valid Coulomb Ewald correction tables");
         init_ewald_coulomb_force_table(*ic.coulombEwaldTables, nbp, deviceContext, localStream);
     }
+    init_pswf_polynomial_tables(ic, nbp, deviceContext, localStream);
 
     /* set up LJ parameter lookup table */
     if (!useLjCombRule(nbp->vdwType))
@@ -1232,6 +1299,8 @@ void gpu_free(NbnxmGpu* nb)
     {
         destroyParamLookupTable(&nbparam->coulomb_tab, &nbparam->coulomb_tab_texobj);
     }
+    freeDeviceBuffer(&nbparam->pswf_long_range_force_coeff);
+    freeDeviceBuffer(&nbparam->pswf_long_range_energy_coeff);
 
     if (!useLjCombRule(nb->nbparam->vdwType))
     {

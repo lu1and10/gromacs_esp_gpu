@@ -184,20 +184,28 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
     float two_k_rf = nbparam.two_k_rf;
 #    endif
 #    ifdef EL_EWALD_ANA
-    float beta2 = nbparam.ewald_beta * nbparam.ewald_beta;
-    float beta3 = nbparam.ewald_beta * nbparam.ewald_beta * nbparam.ewald_beta;
+    const float             rcoulomb_inv    = nbparam.rcoulomb_inv;
+    const float* __restrict__ pswfForceCoeff = nbparam.pswf_long_range_force_coeff;
+    const int               pswfForceOrder  = nbparam.pswf_long_range_force_order;
+#        ifdef CALC_ENERGIES
+    const float* __restrict__ pswfEnergyCoeff = nbparam.pswf_long_range_energy_coeff;
+    const int               pswfEnergyOrder = nbparam.pswf_long_range_energy_order;
+#        endif
 #    endif
 #    ifdef PRUNE_NBL
     float rlist_sq = nbparam.rlistOuter_sq;
 #    endif
 
 #    ifdef CALC_ENERGIES
-#        ifdef EL_EWALD_ANY
-    float beta        = nbparam.ewald_beta;
+#        ifdef EL_EWALD_ANA
     float ewald_shift = nbparam.sh_ewald;
+    float pswf_self   = nbparam.pswf_self;
+#        elif defined EL_EWALD_TAB
+    float ewald_shift = nbparam.sh_ewald;
+    float pswf_self   = nbparam.pswf_self;
 #        else
     float reactionFieldShift = nbparam.c_rf;
-#        endif /* EL_EWALD_ANY */
+#        endif /* EL_EWALD_ANA/TAB */
     float* e_lj = atdat.eLJ;
     float* e_el = atdat.eElec;
 #    endif     /* CALC_ENERGIES */
@@ -396,8 +404,10 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
         E_el /= nbparam.epsfac * c_clusterSize * NTHREAD_Z;
 #                if defined EL_RF || defined EL_CUTOFF
         E_el *= -0.5F * reactionFieldShift;
+#                elif defined EL_EWALD_ANA || defined EL_EWALD_TAB
+        E_el *= -pswf_self;
 #                else
-        E_el *= -beta * M_FLOAT_1_SQRTPI; /* last factor 1/sqrt(pi) */
+        E_el *= -nbparam.ewald_beta * M_FLOAT_1_SQRTPI; /* last factor 1/sqrt(pi) */
 #                endif
 #            endif /* EL_EWALD_ANY || defined EL_RF || defined EL_CUTOFF */
     }
@@ -622,8 +632,11 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
                                 F_invr += qi * qj_f * (int_bit * inv_r2 * inv_r - two_k_rf);
 #    endif
 #    if defined EL_EWALD_ANA
+                                const float rdivrc = r2 * inv_r * rcoulomb_inv;
+                                const float pswfCorrF =
+                                        evaluate_pswf_monomial(pswfForceCoeff, pswfForceOrder, rdivrc);
                                 F_invr += qi * qj_f
-                                          * (int_bit * inv_r2 * inv_r + pmeCorrF(beta2 * r2) * beta3);
+                                          * ((int_bit + pswfCorrF) * inv_r2 * inv_r);
 #    elif defined EL_EWALD_TAB
                                 F_invr += qi * qj_f
                                           * (int_bit * inv_r2
@@ -639,11 +652,21 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
                                 E_el += qi * qj_f
                                         * (int_bit * inv_r + 0.5F * two_k_rf * r2 - reactionFieldShift);
 #        endif
-#        ifdef EL_EWALD_ANY
-                                /* 1.0F - erff is faster than erfcf */
+#        ifdef EL_EWALD_ANA
+                                const float pswfCorrE =
+                                        evaluate_pswf_monomial(pswfEnergyCoeff, pswfEnergyOrder, rdivrc);
                                 E_el += qi * qj_f
-                                        * (inv_r * (int_bit - erff(r2 * inv_r * beta)) - int_bit * ewald_shift);
-#        endif /* EL_EWALD_ANY */
+                                        * (inv_r * (int_bit - pswfCorrE) - int_bit * ewald_shift);
+#        elif defined EL_EWALD_TAB
+                                // note here energy still uses analytical formula(polynomial)
+                                const float rdivrc = r2 * inv_r * nbparam.rcoulomb_inv;
+                                const float pswfCorrE = evaluate_pswf_monomial(
+                                        nbparam.pswf_long_range_energy_coeff,
+                                        nbparam.pswf_long_range_energy_order,
+                                        rdivrc);
+                                E_el += qi * qj_f
+                                        * (inv_r * (int_bit - pswfCorrE) - int_bit * ewald_shift);
+#        endif /* EL_EWALD_ANA/TAB */
 #    endif
                                 f_ij = rv * F_invr;
 

@@ -67,6 +67,7 @@
 #include "gromacs/ewald/pme_coordinate_receiver_gpu.h"
 #include "gromacs/hardware/device_information.h"
 #include "gromacs/math/boxmatrix.h"
+#include "gromacs/math/pswf.h"
 #include "gromacs/math/units.h"
 #include "gromacs/timing/gpu_timing.h"
 #include "gromacs/timing/wallcycle.h"
@@ -212,9 +213,13 @@ void pme_gpu_realloc_and_copy_bspline_values(PmeGpu* pmeGpu, const int gridIndex
     }
     for (int i = 0; i < DIM; i++)
     {
-        std::memcpy(pmeGpu->staging.h_splineModuli[gridIndex].data() + splineValuesOffset[i],
-                    pmeGpu->common->bsp_mod[i].data(),
-                    pmeGpu->common->bsp_mod[i].size() * sizeof(float));
+        float*            dst = pmeGpu->staging.h_splineModuli[gridIndex].data() + splineValuesOffset[i];
+        const auto&       src = pmeGpu->common->bsp_mod[i];
+        const std::size_t srcSize = src.size();
+        for (std::size_t j = 0; j < srcSize; ++j)
+        {
+            dst[j] = static_cast<float>(src[j]);
+        }
     }
     /* TODO: pin original buffer instead! */
     copyToDeviceBuffer(&pmeGpu->kernelParams->grid.d_splineModuli[gridIndex],
@@ -226,6 +231,67 @@ void pme_gpu_realloc_and_copy_bspline_values(PmeGpu* pmeGpu, const int gridIndex
                        nullptr);
 }
 
+static void pme_gpu_realloc_and_copy_pswf_values(PmeGpu* pmeGpu)
+{
+    auto* kernelParamsPtr = pmeGpu->kernelParams.get();
+
+    const auto copyPswfCoefficients = [&](const std::vector<real>& source,
+                                          gmx::HostVector<float>* stagingBuffer,
+                                          DeviceBuffer<float>*    deviceBuffer,
+                                          int*                    sizeTracker,
+                                          int*                    capacityTracker)
+    {
+        const int newCoeffCount = source.size();
+        reallocateDeviceBuffer(deviceBuffer,
+                               newCoeffCount,
+                               sizeTracker,
+                               capacityTracker,
+                               pmeGpu->archSpecific->deviceContext_);
+        if (stagingBuffer->size() < static_cast<size_t>(newCoeffCount))
+        {
+            changePinningPolicy(stagingBuffer, gmx::PinningPolicy::PinnedIfSupported);
+        }
+        stagingBuffer->resize(newCoeffCount);
+        if (newCoeffCount == 0)
+        {
+            return;
+        }
+
+        for (int i = 0; i < newCoeffCount; ++i)
+        {
+            (*stagingBuffer)[i] = static_cast<float>(source[i]);
+        }
+        copyToDeviceBuffer(deviceBuffer,
+                           stagingBuffer->data(),
+                           0,
+                           newCoeffCount,
+                           pmeGpu->archSpecific->pmeStream_,
+                           pmeGpu->settings.transferKind,
+                           nullptr);
+    };
+
+    copyPswfCoefficients(pmeGpu->common->pswfSpreadCoeffs,
+                         &pmeGpu->staging.h_pswfSpreadCoeffs,
+                         &kernelParamsPtr->grid.d_pswfSpreadCoeffs,
+                         &pmeGpu->archSpecific->pswfSpreadCoeffsSize,
+                         &pmeGpu->archSpecific->pswfSpreadCoeffsCapacity);
+    copyPswfCoefficients(pmeGpu->common->pswfSpreadDerivCoeffs,
+                         &pmeGpu->staging.h_pswfSpreadDerivCoeffs,
+                         &kernelParamsPtr->grid.d_pswfSpreadDerivCoeffs,
+                         &pmeGpu->archSpecific->pswfSpreadDerivCoeffsSize,
+                         &pmeGpu->archSpecific->pswfSpreadDerivCoeffsCapacity);
+    copyPswfCoefficients(pmeGpu->common->pswfSplitFourierCoeffs,
+                         &pmeGpu->staging.h_pswfSplitFourierCoeffs,
+                         &kernelParamsPtr->grid.d_pswfSplitFourierCoeffs,
+                         &pmeGpu->archSpecific->pswfSplitFourierCoeffsSize,
+                         &pmeGpu->archSpecific->pswfSplitFourierCoeffsCapacity);
+    copyPswfCoefficients(pmeGpu->common->pswfSplitFourierDerivCoeffs,
+                         &pmeGpu->staging.h_pswfSplitFourierDerivCoeffs,
+                         &kernelParamsPtr->grid.d_pswfSplitFourierDerivCoeffs,
+                         &pmeGpu->archSpecific->pswfSplitFourierDerivCoeffsSize,
+                         &pmeGpu->archSpecific->pswfSplitFourierDerivCoeffsCapacity);
+}
+
 void pme_gpu_free_bspline_values(PmeGpu* pmeGpu)
 {
     for (int gridIndex = 0; gridIndex < pmeGpu->common->ngrids; gridIndex++)
@@ -233,6 +299,14 @@ void pme_gpu_free_bspline_values(PmeGpu* pmeGpu)
         pmeGpu->staging.h_splineModuli[gridIndex].clear();
         freeDeviceBuffer(&pmeGpu->kernelParams->grid.d_splineModuli[gridIndex]);
     }
+    pmeGpu->staging.h_pswfSpreadCoeffs.clear();
+    pmeGpu->staging.h_pswfSpreadDerivCoeffs.clear();
+    pmeGpu->staging.h_pswfSplitFourierCoeffs.clear();
+    pmeGpu->staging.h_pswfSplitFourierDerivCoeffs.clear();
+    freeDeviceBuffer(&pmeGpu->kernelParams->grid.d_pswfSpreadCoeffs);
+    freeDeviceBuffer(&pmeGpu->kernelParams->grid.d_pswfSpreadDerivCoeffs);
+    freeDeviceBuffer(&pmeGpu->kernelParams->grid.d_pswfSplitFourierCoeffs);
+    freeDeviceBuffer(&pmeGpu->kernelParams->grid.d_pswfSplitFourierDerivCoeffs);
 }
 
 void pme_gpu_realloc_forces(PmeGpu* pmeGpu)
@@ -1163,6 +1237,15 @@ static void pme_gpu_reinit_grids(PmeGpu* pmeGpu)
 
     kernelParamsPtr->grid.ewaldFactor =
             (M_PI * M_PI) / (pmeGpu->common->ewaldcoeff_q * pmeGpu->common->ewaldcoeff_q);
+    kernelParamsPtr->grid.pswfRcoulomb                = pmeGpu->common->pswfRcoulomb;
+    kernelParamsPtr->grid.pswfSpreadCoeffQ            = pmeGpu->common->pswfSpreadCoeffQ;
+    kernelParamsPtr->grid.pswfSplitCoeffQ             = pmeGpu->common->pswfSplitCoeffQ;
+    kernelParamsPtr->grid.pswfSpreadCoeffStride       = pmeGpu->common->pswfSpreadCoeffStride;
+    kernelParamsPtr->grid.pswfSpreadPolyOrder         = pmeGpu->common->pswfSpreadPolyOrder;
+    kernelParamsPtr->grid.pswfSpreadDerivPolyOrder    = pmeGpu->common->pswfSpreadDerivPolyOrder;
+    kernelParamsPtr->grid.pswfSplitFourierPolyOrder   = pmeGpu->common->pswfSplitFourierPolyOrder;
+    kernelParamsPtr->grid.pswfSplitFourierDerivPolyOrder =
+            pmeGpu->common->pswfSplitFourierDerivPolyOrder;
     /* The grid size variants */
     for (int i = 0; i < DIM; i++)
     {
@@ -1194,6 +1277,7 @@ static void pme_gpu_reinit_grids(PmeGpu* pmeGpu)
     kernelParamsPtr->grid.complexGridSizePadded[ZZ] = kernelParamsPtr->grid.complexGridSize[ZZ];
 
     pme_gpu_realloc_and_copy_fract_shifts(pmeGpu);
+    pme_gpu_realloc_and_copy_pswf_values(pmeGpu);
     for (int gridIndex = 0; gridIndex < pmeGpu->common->ngrids; gridIndex++)
     {
         pme_gpu_realloc_and_copy_bspline_values(pmeGpu, gridIndex);
@@ -1230,6 +1314,49 @@ static void pme_gpu_copy_common_data_from(const gmx_pme_t* pme)
     pmeGpu->common->nk[YY]       = pme->nky;
     pmeGpu->common->nk[ZZ]       = pme->nkz;
     pmeGpu->common->pme_order    = pme->pme_order;
+    pmeGpu->common->pswfSpreadCoeffQ = pme->pswf_spread_coeff_q;
+    pmeGpu->common->pswfSplitCoeffQ  = pme->pswf_split_coeff_q;
+    pmeGpu->common->pswfRcoulomb     = pme->pswf_rcoulomb;
+    pmeGpu->common->pswfSpreadCoeffStride = pmeGpu->common->pme_order;
+    AlignedVector<real> pswfSpreadCoeffsDense;
+    AlignedVector<real> pswfSpreadDerivCoeffsDense;
+    convert_spread_coefficients_to_dense(
+            pmeGpu->common->pme_order, pme->spread_pswf, pswfSpreadCoeffsDense);
+    convert_spread_coefficients_to_dense(
+            pmeGpu->common->pme_order, pme->spread_pswf_derivative, pswfSpreadDerivCoeffsDense);
+    pmeGpu->common->pswfSpreadCoeffs.assign(pswfSpreadCoeffsDense.begin(), pswfSpreadCoeffsDense.end());
+    pmeGpu->common->pswfSpreadDerivCoeffs.assign(
+            pswfSpreadDerivCoeffsDense.begin(), pswfSpreadDerivCoeffsDense.end());
+    pmeGpu->common->pswfSplitFourierCoeffs.assign(pme->pswf_split_fun_fourier.begin(),
+                                                   pme->pswf_split_fun_fourier.end());
+    pmeGpu->common->pswfSplitFourierDerivCoeffs.assign(pme->pswf_split_fun_fourier_der.begin(),
+                                                        pme->pswf_split_fun_fourier_der.end());
+    if (pmeGpu->common->pme_order > 0 && !pmeGpu->common->pswfSpreadCoeffs.empty())
+    {
+        GMX_RELEASE_ASSERT((pmeGpu->common->pswfSpreadCoeffs.size() % pmeGpu->common->pme_order) == 0,
+                           "Invalid PSWF spread coefficient layout");
+        pmeGpu->common->pswfSpreadPolyOrder =
+                pmeGpu->common->pswfSpreadCoeffs.size() / pmeGpu->common->pme_order;
+    }
+    else
+    {
+        pmeGpu->common->pswfSpreadPolyOrder = 0;
+    }
+    if (pmeGpu->common->pme_order > 0 && !pmeGpu->common->pswfSpreadDerivCoeffs.empty())
+    {
+        GMX_RELEASE_ASSERT((pmeGpu->common->pswfSpreadDerivCoeffs.size() % pmeGpu->common->pme_order)
+                                   == 0,
+                           "Invalid PSWF spread derivative coefficient layout");
+        pmeGpu->common->pswfSpreadDerivPolyOrder =
+                pmeGpu->common->pswfSpreadDerivCoeffs.size() / pmeGpu->common->pme_order;
+    }
+    else
+    {
+        pmeGpu->common->pswfSpreadDerivPolyOrder = 0;
+    }
+    pmeGpu->common->pswfSplitFourierPolyOrder = pmeGpu->common->pswfSplitFourierCoeffs.size();
+    pmeGpu->common->pswfSplitFourierDerivPolyOrder =
+            pmeGpu->common->pswfSplitFourierDerivCoeffs.size();
     // overlap region is needed only in case of decomposition
     pmeGpu->common->pmegridNk[XX] = pme->nnodes_major > 1 ? pme->pmegrid_nx : pme->nkx;
     pmeGpu->common->pmegridNk[YY] = pme->nnodes_minor > 1 ? pme->pmegrid_ny : pme->nky;

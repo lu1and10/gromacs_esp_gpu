@@ -816,7 +816,10 @@ gmx_pme_t* gmx_pme_init(const t_commrec*                 cr,
     // can be one degree less than spread_pswf, what does this mean ???
     //spread_window_real_space_der_cheb(pme->pme_order, tol_spread, tol_spread_coeff, pme->spread_pswf_derivative, pswf_c);
     spread_window_real_space_der_mono(pme->pme_order, tol_spread, tol_spread_coeff, pme->spread_pswf_derivative, pswf_c);
-    spread_window_fourier_space(tol_spread, tol_spread_coeff, pme->spread_pswf_fourier);
+
+    // TODO: spread_pswf_fourier is not used, bsp_mod is using pswf reference evaluation
+    // cost depends on how many time step grid size changes
+    //spread_window_fourier_space(tol_spread, tol_spread_coeff, pme->spread_pswf_fourier);
 
     /* splitting polynomials setup */
     pme->pswf_rcoulomb = ir->rcoulomb;

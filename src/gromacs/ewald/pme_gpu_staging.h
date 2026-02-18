@@ -69,6 +69,14 @@ struct PmeGpuStaging
     std::array<gmx::HostVector<float>, sc_numFepStates> h_virialAndEnergy;
     /*! \brief B-spline values intermediate host-side buffer. */
     std::array<gmx::HostVector<float>, sc_numFepStates> h_splineModuli;
+    /*! \brief PSWF spread coefficients intermediate host-side buffer. */
+    gmx::HostVector<float> h_pswfSpreadCoeffs;
+    /*! \brief PSWF spread derivative coefficients intermediate host-side buffer. */
+    gmx::HostVector<float> h_pswfSpreadDerivCoeffs;
+    /*! \brief PSWF split Fourier coefficients intermediate host-side buffer. */
+    gmx::HostVector<float> h_pswfSplitFourierCoeffs;
+    /*! \brief PSWF split Fourier derivative coefficients intermediate host-side buffer. */
+    gmx::HostVector<float> h_pswfSplitFourierDerivCoeffs;
 
     /*! \brief Pointer to the host memory with B-spline values. Only used for host-side gather, or unit tests */
     gmx::HostVector<float> h_theta;

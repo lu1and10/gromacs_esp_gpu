@@ -119,6 +119,22 @@ struct PmeGpuGridParams
 {
     /*! \brief Ewald solving factor = (M_PI / pme->ewaldcoeff_q)^2 */
     float ewaldFactor;
+    /*! \brief PSWF rcoulomb scale used in spread/solve kernels. */
+    float pswfRcoulomb;
+    /*! \brief PSWF spread shape parameter. */
+    float pswfSpreadCoeffQ;
+    /*! \brief PSWF split shape parameter. */
+    float pswfSplitCoeffQ;
+    /*! \brief spread order per PSWF polynomial row in dense poly-major layout. */
+    int pswfSpreadCoeffStride;
+    /*! \brief PSWF spread polynomial order (monomial basis). */
+    int pswfSpreadPolyOrder;
+    /*! \brief PSWF spread derivative polynomial order (monomial basis). */
+    int pswfSpreadDerivPolyOrder;
+    /*! \brief PSWF split Fourier polynomial order (Chebyshev basis). */
+    int pswfSplitFourierPolyOrder;
+    /*! \brief PSWF split Fourier derivative polynomial order (Chebyshev basis). */
+    int pswfSplitFourierDerivPolyOrder;
 
     /* Grid sizes */
     /*! \brief Real-space grid data dimensions. */
@@ -155,6 +171,14 @@ struct PmeGpuGridParams
      * (laid out sequentially (XXX....XYYY......YZZZ.....Z))
      */
     HIDE_FROM_OPENCL_COMPILER(DeviceBuffer<float>) d_splineModuli[NUMFEPSTATES];
+    /*! \brief PSWF spread coefficients in monomial basis (dense poly-major: [poly][spread]). */
+    HIDE_FROM_OPENCL_COMPILER(DeviceBuffer<float>) d_pswfSpreadCoeffs;
+    /*! \brief PSWF spread derivative coefficients in monomial basis (dense poly-major: [poly][spread]). */
+    HIDE_FROM_OPENCL_COMPILER(DeviceBuffer<float>) d_pswfSpreadDerivCoeffs;
+    /*! \brief PSWF split coefficients in Fourier space (Chebyshev basis). */
+    HIDE_FROM_OPENCL_COMPILER(DeviceBuffer<float>) d_pswfSplitFourierCoeffs;
+    /*! \brief PSWF split derivative coefficients in Fourier space (Chebyshev basis). */
+    HIDE_FROM_OPENCL_COMPILER(DeviceBuffer<float>) d_pswfSplitFourierDerivCoeffs;
     /*! \brief Fractional shifts lookup table as in pme->fshx/fshy/fshz, laid out sequentially (XXX....XYYY......YZZZ.....Z) */
     HIDE_FROM_OPENCL_COMPILER(DeviceBuffer<float>) d_fractShiftsTable;
     /*! \brief Gridline indices lookup table

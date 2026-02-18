@@ -209,6 +209,14 @@ struct NBParamGpu
     float ewald_beta;
     //! Ewald/PME correction term subtracted from the direct-space potential
     float sh_ewald;
+    //! PSWF self interaction coefficient used in reciprocal self-energy correction
+    float pswf_self;
+    //! Inverse Coulomb cut-off used for PSWF r/rc scaling
+    float rcoulomb_inv;
+    //! Number of monomial coefficients for PSWF long-range force correction
+    int pswf_long_range_force_order;
+    //! Number of monomial coefficients for PSWF long-range energy correction
+    int pswf_long_range_energy_order;
     //! LJ-Ewald/PME correction term added to the correction potential
     float sh_lj_ewald;
     //! LJ-Ewald/PME coefficient
@@ -252,6 +260,11 @@ struct NBParamGpu
     DeviceBuffer<float> coulomb_tab{};
     //! texture object bound to coulomb_tab
     DeviceTexture coulomb_tab_texobj;
+
+    //! PSWF long-range force polynomial coefficients (monomial basis)
+    DeviceBuffer<float> pswf_long_range_force_coeff{};
+    //! PSWF long-range energy polynomial coefficients (monomial basis)
+    DeviceBuffer<float> pswf_long_range_energy_coeff{};
 };
 
 /*! \internal
