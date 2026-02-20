@@ -495,6 +495,7 @@ static double spline3_table_scale(double third_deriv_max, double x_scale, double
                    poly_coeff[1] * pswf_c * pswf_c +
                    poly_coeff[2] * pswf_c +
                    poly_coeff[3];
+        sc_deriv *= 3.0; // safe factor
     }
     #ifdef MYDEBUGPRINT
     std::cout << "third_deriv_max: " << third_deriv_max << std::endl;
